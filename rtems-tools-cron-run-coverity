@@ -1,0 +1,175 @@
+#! /bin/sh
+#
+#  Automated build and test script which performs the following.
+#
+#  - Updates RTEMS Tools
+#  - If RTEMS Tools changed, build and do Coverity Scan
+
+# uncomment this to watch the commands and do nothing
+# TECHO=echo
+
+progname=${0##*/}        # fast basename hack for ksh, bash
+
+USAGE=\
+"usage: $progname [ -opts ]
+  -v               verbose (default=no)
+  -f               force build (default=no)
+  -g               do git update (default=yes)
+  -D               Top directory (default=${HOME}/rtems-cron-coverity)
+  -V               RTEMS Version (default=5)
+"
+
+#   log an error to stderr
+prerr()
+{
+    echo "$*" >&2
+}
+
+fatal() {
+    [ "$1" ] && prerr $*
+    prerr "$USAGE"
+    exit 1
+}
+
+warn() {
+    [ "$1" ] && prerr $*
+}
+
+check_status()
+{
+  if [ $1 -ne 0 ] ; then
+    shift 
+    echo "FAILED: " "$*" >&2
+    exit 1
+  fi
+}
+
+INFO()
+{
+  echo "${*}" >>${LOGFILE}  
+}
+
+LOG()
+{
+  status=$1
+  if [ ${status} -eq 0 ] ; then
+    S="PASSED"
+  else
+    S="FAILED (${status})"
+  fi
+  shift
+  echo "${S} " $* >>${LOGFILE}  
+}
+
+# directory where run from
+exedir=`dirname "$0"`
+exedir=`( cd "${exedir}" && pwd )`
+
+coverity_runner=${exedir}/rtems-tools-run-coverity
+test -x ${coverity_runner}
+check_status $? "${coverity_runner} is not present"
+
+# Default Behavioral variables to set
+verbose="no"
+version="6"
+force_build="no"
+do_git_update="yes"
+TOP=${HOME}/rtems-cron-coverity
+
+while getopts "fgtvD:V:" OPT
+do
+ case "$OPT" in
+   f) force_build="yes";;
+   g) do_git_update="no" ;;
+   v) verbose="yes";;
+   D) TOP="$OPTARG";;
+   V) version="$OPTARG";;
+   *) fatal;;
+ esac
+done
+
+shiftcount=`expr $OPTIND - 1`
+shift $shiftcount
+
+if [ ! -d ${TOP} ] ; then
+  echo "echo Bad TOP directory (${TOP}!"
+  exit 1
+fi
+
+# Empty it out and maybe set one standard contents
+LOGFILE=${TOP}/all-log.txt
+
+echo >${LOGFILE}
+
+### Check directories
+rtems_tools_dir=${TOP}/rtems-tools
+
+for d in ${rtems_tools_dir}
+do
+  test -d ${d}
+  check_status $? "${d} is not present"
+done
+
+update()
+{
+  # This is OK except for rtems-libbsd
+  case ${version} in
+    6|7) branch=master ;;
+    *)   branch=${version} ;;
+  esac
+
+  git checkout ${branch} >/dev/null
+  git fetch >/dev/null
+  c=`git rev-list HEAD...origin/${branch} --count 2>/dev/null`
+  echo ${c}
+}
+
+start=`date`
+
+if [ ${do_git_update} = "yes" ] ; then
+  cd ${TOP}/rtems-tools
+  rtems_tools_updated="no"
+  c=`update`
+  if [ ${c} -ne 0 ] ; then
+    git pull
+    check_status $? "git pull of rtems-tools failed"
+    rtems_tools_updated="yes"
+  fi
+  test ${verbose} = "yes" && echo "rtems-tools: ${c} updates"
+  INFO "rtems-tools had ${c} revisions to update" 
+fi
+
+# Force -- make it look like everything updated
+if [ ${force_build} = "yes" ] ; then
+  rtems_tools_updated="yes"
+  test ${verbose} = "yes" && echo "Forcing builds whether updates or not"
+fi
+
+if [ ${verbose} = "yes" ] ; then
+  echo Git Update: ${do_git_update}
+  echo Forced Update: ${force_build}
+  echo RTEMS Tools Updated: ${rtems_tools_updated}
+fi
+
+if [ ${force_build} = "no" -a \
+     ${rtems_tools_updated} = "no" ] ; then
+  echo "No updates and forced build not requested -- NO ACTION!"
+  exit 0
+fi
+ 
+if [ ${rtems_tools_updated} = "yes" ] ; then
+  cd ${rtems_tools_dir}/..
+
+  ${coverity_runner}
+
+fi
+
+stop=`date`
+
+INFO "${0} START: " ${start}
+INFO "${0} STOP: " ${stop}
+
+echo "START: " ${start}
+echo "STOP:  " ${stop}
+exit 0
+

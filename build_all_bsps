@@ -1,0 +1,203 @@
+#! /bin/sh -x
+
+version=6
+TOP=/home/joel/rtems-cron-6
+do_autoconf=no
+
+# directory where run from
+exedir=`dirname "$0"`
+exedir=`( cd "${exedir}" && pwd )`
+
+# Empty it out and maybe set one standard contents
+LOGFILE=${TOP}/all-bsps-log.txt
+
+cp /dev/null ${LOGFILE}
+
+INFO()
+{
+  echo "${*}" >>${LOGFILE}  
+}
+
+LOG()
+{
+  status=$1
+  if [ ${status} -eq 0 ] ; then
+    S="PASSED"
+  else
+    S="FAILED (${status})"
+  fi
+  shift
+  echo "${S} " $* >>${LOGFILE}  
+}
+
+
+test_single_bsp()
+{
+  # SMP
+  SMP=${1}
+  case ${1} in
+   "SMP")   SMP_ARGS="-s";;
+   "NOSMP") SMP_ARGS="";;
+   *) fatal "invalid value ${1} for SMP" ;;
+  esac
+  shift
+
+  # Multiprocessing
+  MP=${1}
+  case ${1} in
+   "MP")   MP_ARGS="-m";;
+   "NOMP") MP_ARGS="";;
+   *) fatal "invalid value ${1} for MP" ;;
+  esac
+  shift
+
+  # Debug
+  DEBUG=${1}
+  case ${1} in
+   "DEBUG")   DEBUG_ARGS="-D";;
+   "NODEBUG") DEBUG_ARGS="";;
+   *) fatal "invalid value ${1} for DEBUG" ;;
+  esac
+  shift
+
+  # Profile
+  PROFILE=${1}
+  case ${1} in
+   "PROFILE")   PROFILE_ARGS="-P";;
+   "NOPROFILE") PROFILE_ARGS="";;
+   *) fatal "invalid value ${1} for PROFILE" ;;
+  esac
+  shift
+
+  cpu=${1}
+  bsp=${2}
+
+  # Is this an RTEMS version with an autoconf build, then build that way
+  if [ ${do_autoconf} = "yes" ] ; then
+    if [ -r ${TOP}/rtems/configure.ac ] ; then
+      case ${bsp} in
+	a53_ilp32_qemu|a53_lp64_qemu|xilinx_zynqmp_ilp32_qemu|xilinx_zynqmp_lp64_qemu) ;;
+	imxrt1052|lm3s3749|stm32h7) ;;
+	*)
+	  ${exedir}/build_bsp -a -t -T ${TOP} -V ${version} ${BB_ARGS} \
+	    ${SMP_ARGS} ${MP_ARGS} ${DEBUG_ARGS} ${PROFILE_ARGS} \
+	    ${cpu} ${bsp}
+	  LOG $? "autoconf build of ${cpu} ${bsp} (${SMP}/${MP}/${DEBUG}/${PROFILE})"
+	  ;;
+      esac
+    fi
+  fi
+
+  # Is this an RTEMS version with a waf , then build that way
+  if [ -r ${TOP}/rtems/waf ] ; then
+    ${exedir}/build_bsp -w -t -T ${TOP} -V ${version} ${BB_ARGS} \
+      ${SMP_ARGS} ${MP_ARGS} ${DEBUG_ARGS} ${PROFILE_ARGS} \
+      ${cpu} ${bsp}
+    LOG ${?} "waf build of ${cpu} ${bsp} (${SMP}/${MP}/${DEBUG}/${PROFILE})"
+  fi
+}
+
+CPUS=$*
+
+cd ${TOP}
+
+(cd ${TOP}/rtems ; ./rtems-bsps -P ) | while read line
+do
+  cpu=`echo ${line} | cut -d'/' -f1`
+  bsp=`echo ${line} | cut -d'/' -f2`
+
+  if [ "X${CPUS}" != "X" ] ; then
+    echo ${CPUS} | grep -w ${cpu} >/dev/null
+    if [ $? -ne 0 ] ; then
+      continue
+    fi
+  fi
+
+  # Skip if no compiler
+  type ${cpu}-rtems${version}-gcc >/dev/null 2>&1
+  if [ $? -ne 0 ] ; then
+    echo "WARNING - no gcc for ${cpu} ${bsp}"
+    continue
+  fi
+
+  # BSPs to skip
+  case ${bsp} in
+    bbxm) continue ;;          # bbxm.cfg is a simulator config file
+    rv*_clang) continue ;;  # skip since different in waf
+  esac
+
+  # Only do SMP if BSP supports it
+  case ${line} in
+    arm/altcycv_devkit) has_smp="yes" ;;
+    arm/imx7) has_smp="yes" ;;
+    arm/raspberrypi2) has_smp="yes" ;;
+    arm/realview_pbx_a9_qemu) has_smp="yes" ;;
+    arm/xilinx_zynq_a9_qemu) has_smp="yes" ;;
+    arm/xilinx_zynqmp_ultra96) has_smp="yes" ;;
+    arm/xilinx_zynq_zc702) has_smp="yes" ;;
+    arm/xilinx_zynq_zc706) has_smp="yes" ;;
+    arm/xilinx_zynq_zedboard) has_smp="yes" ;;
+    powerpc/qoriq_e500) has_smp="yes" ;;
+    powerpc/qoriq_e6500_32) has_smp="yes" ;;
+    powerpc/qoriq_e6500_64) has_smp="yes" ;;
+    riscv/griscv) has_smp="yes" ;;
+    riscv/grv32imac) has_smp="yes" ;;
+    riscv/grv32imafdc) has_smp="yes" ;;
+    riscv/rv32iac) has_smp="yes" ;;
+    riscv/rv32imac) has_smp="yes" ;;
+    riscv/rv32imafc) has_smp="yes" ;;
+    riscv/rv32imafd) has_smp="yes" ;;
+    riscv/rv32imafdc) has_smp="yes" ;;
+    riscv/rv64imac) has_smp="yes" ;;
+    riscv/rv64imac_medany) has_smp="yes" ;;
+    riscv/rv64imafd) has_smp="yes" ;;
+    riscv/rv64imafdc) has_smp="yes" ;;
+    riscv/rv64imafdc_medany) has_smp="yes" ;;
+    riscv/rv64imafd_medany) has_smp="yes" ;;
+    sparc/erc32) has_smp="yes" ;;
+    sparc/gr712rc) has_smp="yes" ;;
+    sparc/gr740) has_smp="yes" ;;
+    sparc/leon3) has_smp="yes" ;;
+    *) has_smp="no" ;;
+  esac
+
+  # Only do MP if BSP supports it
+  case ${bsp} in
+    m68k/mvme147s) has_mp="yes" ;;
+    powerpc/psim) has_mp="yes" ;;
+    powerpc/qoriq_core_0) has_mp="yes" ;;
+    powerpc/qoriq_core_1) has_mp="yes" ;;
+    sparc/gr712rc) has_mp="yes" ;;
+    sparc/gr740) has_mp="yes" ;;
+    sparc/leon3) has_mp="yes" ;;
+    sparc/ut699) has_mp="yes" ;;
+    sparc/ut700) has_mp="yes" ;;
+    *) has_mp="no" ;;
+  esac
+
+  if [ ${has_smp} = "yes" ] ; then
+    SMP_OPT="SMP NOSMP"
+  else
+    SMP_OPT="NOSMP"
+  fi
+
+  if [ ${has_mp} = "yes" ] ; then
+    MP_OPT="MP NOMP"
+  else
+    MP_OPT="NOMP"
+  fi
+
+  for smp in ${SMP_OPT}
+  do
+    for mp in ${MP_OPT}
+    do
+      for debug in DEBUG NODEBUG
+      do
+	for profile in PROFILE NOPROFILE
+	do
+	  test_single_bsp ${smp} ${mp} ${debug} ${profile} ${cpu} ${bsp}
+	done
+      done
+    done
+  done
+done

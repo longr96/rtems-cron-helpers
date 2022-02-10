@@ -1,0 +1,456 @@
+#! /bin/sh -x
+#
+#  Automated build and test script which performs the following.
+#
+#  rtems-libbsd is only built via BSP bsets
+
+# uncomment this to watch the commands and do nothing
+# TECHO=echo
+
+USAGE=\
+"usage: $progname [ -opts ]
+  -v               verbose (default=no)
+  -f               force build (default=no)
+  -g               do git update (default=yes)
+  -D               Top directory (default=${HOME}/rtems-cron-@version@)
+  -V               RTEMS Version (default=5)
+  -m               send email (default=yes)
+  -F               From address (default=joel@rtems.org)
+  -T               To address (default=build@rtems.org)
+"
+
+#   log an error to stderr
+prerr()
+{
+    echo "$*" >&2
+}
+
+fatal() {
+    [ "$1" ] && prerr $*
+    prerr "$USAGE"
+    exit 1
+}
+
+warn() {
+    [ "$1" ] && prerr $*
+}
+
+check_status()
+{
+  if [ $1 -ne 0 ] ; then
+    shift 
+    echo "FAILED: " "$*" >&2
+    exit 1
+  fi
+}
+
+INFO()
+{
+  echo "${*}" >>${LOGFILE}  
+}
+
+LOG()
+{
+  status=$1
+  if [ ${status} -eq 0 ] ; then
+    S="PASSED"
+  else
+    S="FAILED (${status})"
+  fi
+  shift
+  echo "${S} " $* >>${LOGFILE}  
+}
+
+# directory where run from
+exedir=`dirname "$0"`
+exedir=`( cd "${exedir}" && pwd )`
+
+# Default Behavioral variables to set
+verbose="no"
+version="5"
+force_build="no"
+do_git_update="yes"
+do_email="yes"
+TOP=${HOME}/rtems-cron-${version}
+FROM_ADDRESS="joel@rtems.org"
+TO_ADDRESS="build@rtems.org"
+
+while getopts "fgmtvD:F:T:V:" OPT
+do
+ case "$OPT" in
+   f) force_build="yes";;
+   g) do_git_update="no" ;;
+   m) do_email="no";;
+   v) verbose="yes";;
+   D) TOP="$OPTARG";;
+   F) FROM_ADDRESS="$OPTARG";;
+   T) TO_ADDRESS="$OPTARG";;
+   V) version="$OPTARG";;
+   *) fatal;;
+ esac
+done
+
+shiftcount=`expr $OPTIND - 1`
+shift $shiftcount
+
+if [ ! -d ${TOP} ] ; then
+  echo "echo Bad TOP directory (${TOP}!"
+  exit 1
+fi
+
+# Empty it out and maybe set one standard contents
+LOGFILE=${TOP}/all-log.txt
+
+echo >${LOGFILE}
+
+### Check directories
+rtemsdir=${TOP}/rtems
+
+for d in ${rtemsdir} ${TOP}/rtems-source-builder
+do
+  test -d ${d}
+  check_status $? "${d} is not present"
+done
+
+update()
+{
+  # This is OK except for rtems-libbsd
+  case ${version} in
+    6|7) branch=master ;;
+    *)   branch=${version} ;;
+  esac
+
+  git checkout ${branch} >/dev/null
+  git fetch >/dev/null
+  c=`git rev-list HEAD...origin/${branch} --count 2>/dev/null`
+  echo ${c}
+}
+
+start=`date`
+
+if [ ${do_git_update} = "yes" ] ; then
+  # What needs updating
+  cd ${TOP}/rtems-source-builder
+  rsb_updated="no"
+  c=`update`
+  if [ ${c} -ne 0 ] ; then
+    git pull
+    check_status $? "git pull of rtems-source-builder failed"
+    rsb_updated="yes"
+  fi
+  test ${verbose} = "yes" && echo "rtems-source-builder: ${c} updates"
+  INFO "RSB had ${c} revisions to update" 
+
+  cd ${TOP}/rtems
+  rtems_updated="no"
+  c=`update`
+  if [ ${c} -ne 0 ] ; then
+    git pull
+    check_status $? "git pull of rtems failed"
+    rtems_updated="yes"
+  fi
+  test ${verbose} = "yes" && echo "rtems: ${c} updates"
+  INFO "rtems had ${c} revisions to update" 
+fi
+
+# Force -- make it look like everything updated
+if [ ${force_build} = "yes" ] ; then
+  rsb_updated="yes"
+  rtems_updated="yes"
+  test ${verbose} = "yes" && echo "Forcing builds whether updates or not"
+fi
+
+if [ ${do_email} = "yes" ]; then
+  # From comes from ~/.gitconfig
+  #--mail-from=${FROM_ADDRESS}
+  RSB_MAIL_ARGS="
+   --mail \
+   --use-gitconfig \
+   --mail-to=${TO_ADDRESS}"
+fi
+
+if [ ${verbose} = "yes" ] ; then
+  echo Git Update: ${do_git_update}
+  echo Forced Update: ${force_build}
+  echo RSB Updated: ${rsb_updated}
+  echo RTEMS Updated: ${rtems_updated}
+fi
+
+if [ ${force_build} = "no" -a \
+     ${rsb_updated} = "no" -a ${rtems_updated} = "no" ] ; then
+  echo "No updates and forced build not requested -- NO ACTION!"
+  exit 0
+fi
+ 
+do_rsb_build_tools()
+{
+  version=$1
+
+  # Basic Cross-compilation Tools
+  echo DATESTAMP=`date`
+    cd ${TOP}/rtems-source-builder/rtems
+    rm -rf ${TOP}/tools/${version}/*
+    cat config/${version}/rtems-all.bset | while read rset
+    do
+      rcpu=`echo ${rset} | cut -d'-' -f2`
+      ${TECHO} time ../source-builder/sb-set-builder \
+         ${RSB_MAIL_ARGS} \
+         --keep-going \
+         --log=l-${rcpu}-${version}.txt \
+         --prefix=${TOP}/tools/${version} \
+         ${rset} >o-${rcpu}-${version}.txt 2>&1
+      results=$?
+      LOG ${results} "RSB build of ${rset}"
+    done
+  echo DATESTAMP=`date`
+
+  if [ ${results} -ne 0 ] ; then
+    echo "RSB build of RTEMS ${version} Tools failed"
+    exit 1
+  fi
+
+  # Device Tree Compiler
+  echo DATESTAMP=`date`
+    cd ${TOP}/rtems-source-builder/bare
+    ${TECHO} time ../source-builder/sb-set-builder \
+       ${RSB_MAIL_ARGS} \
+       --log=l-dtc-${version}.txt \
+       --prefix=${TOP}/tools/${version} \
+       devel/dtc >l-dtc-${version}.txt 2>&1
+    results=$?
+    LOG ${results} "RSB build of devel/dtc"
+  echo DATESTAMP=`date`
+
+  if [ ${results} -ne 0 ] ; then
+    echo "ERROR - RSB build of DTC for RTEMS ${version} Tools failed"
+  fi
+
+  # Spike RISC-V Simulator
+  echo DATESTAMP=`date`
+    cd ${TOP}/rtems-source-builder/bare
+    ${TECHO} time ../source-builder/sb-set-builder \
+       ${RSB_MAIL_ARGS} \
+       --log=l-spike-${version}.txt \
+       --prefix=${TOP}/tools/${version} \
+       devel/spike >l-spike-${version}.txt 2>&1
+    results=$?
+    LOG ${results} "RSB build of devel/spike"
+  echo DATESTAMP=`date`
+
+  if [ ${results} -ne 0 ] ; then
+    echo "ERROR - RSB build of Spike for RTEMS ${version} Tools failed"
+  fi
+
+  # Qemu Simulator
+  echo DATESTAMP=`date`
+    cd ${TOP}/rtems-source-builder/bare
+    ${TECHO} time ../source-builder/sb-set-builder \
+      ${RSB_MAIL_ARGS} \
+      --log=l-qemu-${version}.txt \
+      --prefix=${TOP}/tools/${version} \
+      devel/qemu >l-qemu-${version}.txt 2>&1
+    results=$?
+    LOG ${results} "RSB build of devel/qemu4"
+  echo DATESTAMP=`date`
+
+  if [ ${results} -ne 0 ] ; then
+    echo "ERROR - RSB build of Qemu for RTEMS ${version} Tools failed"
+  fi
+}
+
+do_bsp_builder()
+{
+  case ${version} in
+    5|6)
+      echo DATESTAMP=`date`
+	${TECHO} time ${TOP}/tools/${version}/bin/rtems-bsp-builder \
+	  --rtems=${rtemsdir} \
+	  --build-path=${TOP}/build \
+	  --prefix=${TOP}/tools/${version}/bsps \
+	  --log=${TOP}/bsp-builder.log \
+	  --warnings-report=warnings.log \
+	   ${RSB_MAIL_ARGS} \
+	  --profiles=everything
+	LOG ${?} "rtems-bsp-builder build of everything"
+      echo DATESTAMP=`date`
+      ;;
+    *)
+      echo "WARNING!! rtems-bsp-builder not supported by RTEMS ${version}"
+      ;;
+  esac
+}
+
+export PATH=${TOP}/tools/${version}/bin:${PATH}
+
+# Build RTEMS ${version}.x tools if needed
+if [ ${rsb_updated} = "yes" ] ; then
+  do_rsb_build_tools ${version}
+fi
+
+# Ensure this is after the RSB has built tools and PATH is updated
+if [ ${rtems_updated} = "yes" ] ; then
+  # for autoconf, bootstrap after clone
+  if [ -r ${TOP}/rtems/configure.ac ] ; then
+    cd ${TOP}/rtems
+    ./bootstrap -c
+    if [ -r rtems-bootstrap ] ; then
+      ./rtems-bootstrap
+    elif [ -r bootstrap ] ; then
+      ./bootstrap
+    else
+      echo "This is not an RTEMS version this script supports"
+      exit 0
+    fi
+  fi
+
+  # for waf, no actions after clone
+fi
+
+if [ ${do_email} = "yes" ]; then
+  MAIL_ARG="-m"
+fi
+
+BB_ARGS="-T ${TOP} -v -r ${MAIL_ARG} -t"
+
+test_single_bsp()
+{
+  if [ ${1} = "smp" ] ; then
+    SMP_ARGS="-S"
+    SMP="SMP"
+    shift
+  else
+    SMP="NOSMP"
+  fi
+
+  cpu=${1}
+  bsp=${2}
+
+  type ${cpu}-rtems${version}-gcc >/dev/null 2>&1
+  if [ $? -ne 0 ] ; then
+    echo "WARNING - no gcc for ${cpu} ${bsp}"
+    return
+  fi
+
+  # Has waf, prefer it
+  if [ -r ${TOP}/rtems/waf ] ; then
+    # (NO DEBUG) Is this an RTEMS version with a waf , then build that way
+    ${exedir}/build_bsp -w -V ${version} -T ${TOP} ${BB_ARGS} ${SMP_ARGS}    ${cpu} ${bsp}
+    LOG ${?} "waf build of ${cpu} ${bsp} (${SMP}/NODEBUG)"
+
+    # (DEBUG) Is this an RTEMS version with a waf , then build that way
+    ${exedir}/build_bsp -w -V ${version} -a ${BB_ARGS} ${SMP_ARGS} -D ${cpu} ${bsp}
+    results=$?
+    LOG ${results} "waf build of ${cpu} ${bsp} (${SMP}/DEBUG)"
+    if [ $? -eq 0 ] ; then
+      cd ${TOP}/rtems
+      ./waf distclean
+      cd -
+    fi
+
+  elif [ -r ${TOP}/rtems/configure.ac ] ; then
+    # (NO DEBUG) Is this an RTEMS version with an autoconf build, then build that way
+    ${exedir}/build_bsp -a -V ${version} -T ${TOP} ${BB_ARGS} ${SMP_ARGS}    ${cpu} ${bsp}
+    LOG $? "autoconf build of ${cpu} ${bsp} (${SMP}/NODEBUG)"
+
+    # (DEBUG) Is this an RTEMS version with an autoconf build, then build that way
+    ${exedir}/build_bsp -a -V ${version} -T ${TOP} ${BB_ARGS} ${SMP_ARGS} -D ${cpu} ${bsp}
+    LOG $? "autoconf build of ${cpu} ${bsp} (${SMP}/DEBUG)"
+    if [ $? -eq 0 ] ; then
+      rm -rf b-${bsp}
+    fi
+  fi
+
+}
+
+if [ ${rsb_updated} = "yes" -o ${rtems_updated} = "yes" ] ; then
+  echo DATESTAMP=`date`
+    cd ${rtemsdir}/..
+    # These BSPs use simulators built by default
+    test_single_bsp sparc erc32-sis
+    test_single_bsp sparc leon2-sis
+    test_single_bsp sparc leon3-sis
+    test_single_bsp powerpc psim
+    test_single_bsp mips jmr3904
+    test_single_bsp riscv griscv-sis
+
+    test_single_bsp smp sparc leon3-sis
+
+    # Make sure Spike is available for these BSPs
+    type spike >/dev/null 2>&1
+    if [ $? -eq 0 ] ; then
+      for bsp in rv32iac_spike rv32imac_spike rv32imafc_spike \
+	  rv32imafdc_spike rv32imafd_spike rv32im_spike rv32i_spike \
+	  rv64imac_medany_spike rv64imac_spike rv64imafdc_medany_spike \
+	  rv64imafdc_spike rv64imafd_medany rv64imafd_medany_spike \
+	  rv64imafd_spike
+      do 
+	test_single_bsp riscv ${bsp}
+      done
+    fi
+
+    # Make sure ARM Qemu is available for these BSPs
+    type qemu-system-arm >/dev/null 2>&1
+    if [ $? -eq 0 ] ; then
+      test_single_bsp arm realview_pbx_a9_qemu
+      # test_single_bsp arm xilinx_zynq_a9_qemu
+      test_single_bsp arm xilinx_zynq_zc706_qemu
+
+      test_single_bsp smp arm xilinx_zynq_a9_qemu_smp
+    fi
+
+    # Make sure AARCH64 Qemu is available for these BSPs
+    type qemu-system-aarch64 >/dev/null 2>&1
+    if [ $? -eq 0 ] ; then
+      test_single_bsp aarch64 a53_ilp32_qemu
+      test_single_bsp aarch64 a53_lp64_qemu
+      test_single_bsp aarch64 a72_ilp32_qemu
+      test_single_bsp aarch64 a72_lp64_qemu
+      test_single_bsp aarch64 xilinx_versal_ilp32_qemu
+      test_single_bsp aarch64 xilinx_versal_lp64_qemu
+      test_single_bsp aarch64 xilinx_zynqmp_ilp32_qemu
+      test_single_bsp aarch64 xilinx_zynqmp_lp64_qemu
+
+      test_single_bsp smp aarch64 xilinx_zynqmp_ilp32_qemu
+      test_single_bsp smp aarch64 xilinx_zynqmp_lp64_qemu
+    fi
+
+    # Make sure i386 Qemu is available for these BSPs
+    type qemu-system-i386 >/dev/null 2>&1
+    if [ $? -eq 0 ] ; then
+      test_single_bsp i386 pc586-sse
+      test_single_bsp i386 pc686
+    fi
+
+    # Now build all supported BSP bset stacks
+    cd ${TOP}/rtems-source-builder/rtems
+    bsp_bsets=`ls -1 config/${version}/bsps/*.bset 2>/dev/null | wc -l`
+    if [ ${bsp_bsets} -ne 0 ] ; then
+      for bset in ${bsp_bsets}
+      do
+        ${TECHO} time ../source-builder/sb-set-builder \
+           ${RSB_MAIL_ARGS} \
+           --log=l-${bset}-${version}.txt \
+           --prefix=${TOP}/tools/${version} \
+           ${version}/bsps/${bset} >o-${bset}-${version}.txt 2>&1
+        LOG $? "RSB build of bsps/${bset}"
+      done
+    fi
+  echo DATESTAMP=`date`
+
+  #echo DATESTAMP=`date`
+  #  RTEMS_DIR=${rtems_dir} ~/coverity/do_coverity
+  #echo DATESTAMP=`date`
+
+  do_bsp_builder
+
+fi
+
+stop=`date`
+
+INFO "${0} START: " ${start}
+INFO "${0} STOP: " ${stop}
+
+echo "START: " ${start}
+echo "STOP:  " ${stop}
+exit 0
+

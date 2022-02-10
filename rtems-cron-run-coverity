@@ -1,0 +1,280 @@
+#! /bin/sh
+#
+#  Automated build and test script which performs the following.
+#
+#  - Updates RSB
+#  - Updates RTEMS
+#  - Updates Newlib
+#  - If RSB changed, build SPARC tools
+#  - If RTEMS or RSB changed, build SPARC/leon3 and do Coverity Scan
+#  - If Newlib or RSB changed, build Newlib for SPARC and do Coverity Scan
+
+# uncomment this to watch the commands and do nothing
+# TECHO=echo
+
+# Quite hard coded for now
+ARCH=sparc
+
+progname=${0##*/}        # fast basename hack for ksh, bash
+
+USAGE=\
+"usage: $progname [ -opts ]
+  -v               verbose (default=no)
+  -f               force build (default=no)
+  -g               do git update (default=yes)
+  -D               Top directory (default=${HOME}/rtems-cron-coverity)
+  -V               RTEMS Version (default=5)
+  -m               send email (default=yes)
+  -F               From address (default=joel@rtems.org)
+  -T               To address (default=build@rtems.org)
+"
+
+#   log an error to stderr
+prerr()
+{
+    echo "$*" >&2
+}
+
+fatal() {
+    [ "$1" ] && prerr $*
+    prerr "$USAGE"
+    exit 1
+}
+
+warn() {
+    [ "$1" ] && prerr $*
+}
+
+check_status()
+{
+  if [ $1 -ne 0 ] ; then
+    shift 
+    echo "FAILED: " "$*" >&2
+    exit 1
+  fi
+}
+
+INFO()
+{
+  echo "INFO: ${*}" >>${LOGFILE}  
+}
+
+LOG()
+{
+  status=$1
+  if [ ${status} -eq 0 ] ; then
+    S="PASSED"
+  else
+    S="FAILED (${status})"
+  fi
+  shift
+  echo "${S} " $* >>${LOGFILE}  
+}
+
+# directory where run from
+exedir=`dirname "$0"`
+exedir=`( cd "${exedir}" && pwd )`
+
+coverity_runner_rtems=${exedir}/rtems-run-coverity
+coverity_runner_newlib=${exedir}/rtems-newlib-run-coverity
+
+test -x ${coverity_runner_newlib}
+check_status $? "${coverity_runner_newlib} is not present"
+
+# Default Behavioral variables to set
+verbose="no"
+version="6"
+force_build="no"
+do_git_update="yes"
+do_email="yes"
+TOP=${HOME}/rtems-cron-coverity
+FROM_ADDRESS="joel@rtems.org"
+TO_ADDRESS="build@rtems.org"
+
+while getopts "fgmtvD:F:T:V:" OPT
+do
+ case "$OPT" in
+   f) force_build="yes";;
+   g) do_git_update="no" ;;
+   m) do_email="no";;
+   v) verbose="yes";;
+   D) TOP="$OPTARG";;
+   F) FROM_ADDRESS="$OPTARG";;
+   T) TO_ADDRESS="$OPTARG";;
+   V) version="$OPTARG";;
+   *) fatal;;
+ esac
+done
+
+shiftcount=`expr $OPTIND - 1`
+shift $shiftcount
+
+if [ ! -d ${TOP} ] ; then
+  echo "echo Bad TOP directory (${TOP}!"
+  exit 1
+fi
+
+# Empty it out and maybe set one standard contents
+LOGFILE=${TOP}/coverity-log.txt
+
+echo >${LOGFILE}
+
+### Check directories
+rtemsdir=${TOP}/rtems
+
+for d in ${rtemsdir} ${TOP}/rtems-source-builder
+do
+  test -d ${d}
+  check_status $? "${d} is not present"
+done
+
+update()
+{
+  # This is OK except for rtems-libbsd
+  case ${version} in
+    6|7) branch=master ;;
+    *)   branch=${version} ;;
+  esac
+
+  git checkout ${branch} >/dev/null
+  git fetch >/dev/null
+  c=`git rev-list HEAD...origin/${branch} --count 2>/dev/null`
+  echo ${c}
+}
+
+start=`date`
+
+if [ ${do_git_update} = "yes" ] ; then
+  # What needs updating
+  cd ${TOP}/rtems-source-builder
+  rsb_updated="no"
+  c=`update`
+  if [ ${c} -ne 0 ] ; then
+    git pull
+    check_status $? "git pull of rtems-source-builder failed"
+    rsb_updated="yes"
+  fi
+  test ${verbose} = "yes" && echo "rtems-source-builder: ${c} updates"
+  INFO "RSB had ${c} revisions to update" 
+
+  cd ${TOP}/rtems
+  rtems_updated="no"
+  c=`update`
+  if [ ${c} -ne 0 ] ; then
+    git pull
+    check_status $? "git pull of rtems failed"
+    rtems_updated="yes"
+  fi
+  test ${verbose} = "yes" && echo "rtems: ${c} updates"
+  INFO "rtems had ${c} revisions to update" 
+
+  cd ${TOP}/sourceware-mirror-newlib-cygwin
+  newlib_updated="no"
+  c=`update`
+  if [ ${c} -ne 0 ] ; then
+    git pull
+    check_status $? "git pull of rtems failed"
+    newlib_updated="yes"
+  fi
+  test ${verbose} = "yes" && echo "newlib: ${c} updates"
+  INFO "newlib had ${c} revisions to update" 
+
+fi
+
+# Force -- make it look like everything updated
+if [ ${force_build} = "yes" ] ; then
+  rsb_updated="yes"
+  rtems_updated="yes"
+  newlib_updated="yes"
+  test ${verbose} = "yes" && echo "Forcing builds whether updates or not"
+fi
+
+if [ ${do_email} = "yes" ]; then
+  RSB_MAIL_ARGS="
+   --mail \
+   --mail-to=${TO_ADDRESS} \
+   --mail-from=${FROM_ADDRESS}"
+fi
+
+if [ ${verbose} = "yes" ] ; then
+  echo Git Update: ${do_git_update}
+  echo Forced Update: ${force_build}
+  echo RSB Updated: ${rsb_updated}
+  echo RTEMS Updated: ${rtems_updated}
+  echo Newlib Updated: ${newlib_updated}
+fi
+
+if [ ${force_build} = "no" -a \
+     ${rsb_updated} = "no" -a \
+     ${rtems_updated} = "no" -a ${newlib_updated} = "no" ] ; then
+  echo "No updates and forced build not requested -- NO ACTION!"
+  exit 0
+fi
+ 
+do_rsb_build_tools()
+{
+  version=$1
+
+  # Basic Cross-compilation Tools
+  echo DATESTAMP=`date`
+    cd ${TOP}/rtems-source-builder/rtems
+    rm -rf ${TOP}/tools/${version}/*
+    ${TECHO} time ../source-builder/sb-set-builder \
+       ${RSB_MAIL_ARGS} \
+       --keep-going \
+       --log=l-${ARCH}-${version}.txt \
+       --prefix=${TOP}/tools/${version} \
+       ${version}/rtems-${ARCH} >o-${ARCH}-${version}.txt 2>&1
+    results=$?
+    LOG ${results} "RSB build of ${rset}"
+  echo DATESTAMP=`date`
+
+  if [ ${results} -ne 0 ] ; then
+    echo "RSB build of RTEMS ${version} Tools failed"
+    exit 1
+  fi
+}
+
+export PATH=${TOP}/tools/${version}/bin:${PATH}
+
+# Build RTEMS ${version}.x tools if needed
+if [ ${rsb_updated} = "yes" ] ; then
+  do_rsb_build_tools ${version}
+fi
+
+# Ensure this is after the RSB has built tools and PATH is updated
+#if [ ${rtems_updated} = "yes" ] ; then
+#  # for waf, no actions after clone
+#  ; 
+#fi
+
+if [ ${do_email} = "yes" ]; then
+  MAIL_ARG="-m"
+fi
+
+BB_ARGS="-T ${TOP} -v -r ${MAIL_ARG} -t"
+
+if [ ${rsb_updated} = "yes" -o ${rtems_updated} = "yes" ] ; then
+  cd ${rtemsdir}/..
+
+  INFO "Running Coverity on RTEMS"
+
+  ${coverity_runner_rtems}
+fi
+
+if [ ${rsb_updated} = "yes" -o ${newlib_updated} = "yes" ] ; then
+  cd ${rtemsdir}/..
+
+  INFO "Running Coverity on Newlib"
+  ${coverity_runner_newlib}
+fi
+
+stop=`date`
+
+INFO "${0} START: " ${start}
+INFO "${0} STOP: " ${stop}
+
+echo "START: " ${start}
+echo "STOP:  " ${stop}
+exit 0
+

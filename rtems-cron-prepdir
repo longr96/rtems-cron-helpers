@@ -1,0 +1,129 @@
+#! /bin/sh
+#
+#  Example invocation for a 5.x release snapshot
+#   ~/rtems-cron-helpers/rtems-cron-prepdir \
+#    -D ${HOME}/rtems-cron-5.0.0-m2005-1 \
+#    -r -R https://ftp.rtems.org/pub/rtems/releases/5/5.0.0/5.0.0-m2005-1 \
+#    -t 5.0.0-m2005-1
+
+USAGE=\
+"usage: $progname [ -opts ]
+  -D DIRECTORY     top Directory (default=NOT_SET)
+  -g               prep from git (default=no)
+  -r               prep from release (default=no)
+  -R URL           release URL
+  -t TAG           release tag/version (e.g. rtems-TAG.tar.xz
+  -v               verbose (default=no)
+  -V               RTEMS Version (default=5)
+"
+
+#   log an error to stderr
+prerr()
+{
+    echo "$*" >&2
+}
+
+fatal() {
+    [ "$1" ] && prerr $*
+    prerr "$USAGE"
+    exit 1
+}
+
+warn() {
+    [ "$1" ] && prerr $*
+}
+
+check_status()
+{
+  if [ $1 -ne 0 ] ; then
+    shift 
+    echo "FAILED: " "$*" >&2
+    exit 1
+  fi
+}
+
+# directory where run from
+exedir=`dirname "$0"`
+exedir=`( cd "${exedir}" && pwd )`
+
+# Default Behavioral variables to set
+verbose="no"
+version="5"
+TOP=${HOME}/rtems-cron
+from_git="no"
+from_release="no"
+release_URL="NOT_SET"
+release_tag="NOT_SET"
+
+while getopts "D:grR:t:vV:" OPT
+do
+ case "$OPT" in
+   D) TOP="$OPTARG";;
+   g) from_git="yes" ;;
+   r) from_release="yes" ;;
+   R) release_URL="$OPTARG";;
+   t) release_tag="$OPTARG";;
+   v) verbose="yes";;
+   V) version="$OPTARG";;
+   *) fatal;;
+ esac
+done
+
+shiftcount=`expr $OPTIND - 1`
+shift $shiftcount
+
+if [ -d ${TOP} ] ; then
+  echo "TOP directory already exists -- ${TOP}"
+  echo "Clean up before running prep!"
+  exit 1
+fi
+
+if [ ${from_git} = "yes" ] ; then
+  echo >/dev/null; # nothing else to check
+elif [ ${from_release} = "yes" ] ; then
+ if [ ${release_URL} = "NOT_SET" ] ; then
+   echo "release URL not set"
+   exit 1
+ fi
+ if [ ${release_tag} = "NOT_SET" ] ; then
+   echo "release tag not set"
+   exit 1
+ fi
+  
+fi
+
+######## Done checking arguments
+
+mkdir ${TOP}
+
+### clone directories
+echo "Preparing ${TOP}..."
+cd ${TOP}
+
+if [ ${from_git} = "yes" ] ; then
+  for d in rtems rtems-source-builder
+  do
+    git clone git://git.rtems.org/${d}.git
+    check_status $? "unable to git clone ${d}"
+  done
+elif [ ${from_release} = "yes" ] ; then
+  for d in rtems rtems-source-builder
+  do
+    wget ${release_URL}/sources/${d}-${release_tag}.tar.xz
+    check_status $? "unable to fetch ${d} from ${release_URL} directory"
+
+    tar xf ${d}-${release_tag}.tar.xz
+    check_status $? "unable to untar ${d}-${release_tag}.tar.xz"
+
+    ln -s ${d}-${release_tag} ${d}
+    check_status $? "unable to link ${d}-${release_tag} to ${d}"
+
+  done
+
+else
+  echo "Specify preparing from release or git"
+  exit 1
+fi
+
+exit 0
+

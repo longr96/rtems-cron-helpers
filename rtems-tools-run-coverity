@@ -1,0 +1,134 @@
+#! /bin/sh
+#
+#  This script automates running Coverity on RTEMS and submitting
+#  the results.
+#
+#       + Instructions: http://scan.coverity.com/self-build/
+#       + Results:      http://scan2.coverity.com:9104/
+#
+#  You have to have an account to view the results
+# 
+# NOTE:
+#    + build.raw is very important if something goes wrong
+# 
+
+#
+# TODO:
+#   + parse arguments for some of the hard-coded items.
+#   + better instructions on setup. Where to download, etc.
+#
+
+COVERITY_VERSION=cov-analysis-linux64-2020.09
+COVERITY_BASE=${HOME}/coverity
+COVERITY=${COVERITY_BASE}/${COVERITY_VERSION}
+RTEMS_TOOLS=/home/joel/rtems-cron-coveritu/tools/6/
+
+COVERITY_SCAN_TOKEN=zhfOCWF5jpcB-sGffpvKaQ
+RESULTS_DIR=cov-int
+RESULTS_ARCHIVE=${RESULTS_DIR}.tar.bz2
+OWNER_EMAIL=joel.sherrill@gmail.com
+UPLOAD_URL=https://scan.coverity.com/builds?project=RTEMS-Tools
+
+# Prepend Coverity to our PATH
+export PATH=${COVERITY}/bin:$PATH
+
+#
+#  Checks the status returned by executables and exits if it is non-zero.
+#
+check_fatal()
+{
+  if [ $1 -ne 0 ] ; then
+    shift
+    echo "ERROR: $*" >&2
+    exit 1
+  fi
+}
+
+test -r ${COVERITY_BASE}/${COVERITY_VERSION}.tar.gz
+check_fatal $? "${COVERITY} tarball does not exist"
+
+test -d rtems-tools
+check_fatal $? "rtems-tools should be in the current directory"
+
+test ${LOGNAME} = "joel"
+check_fatal $? "For now, Coverity must be run by joel"
+
+# Remove Coverity and reinstall to get fresh compiler configuration 
+cd ${COVERITY_BASE}
+check_fatal $? "Could not cd ${COVERITY_BASE}"
+
+rm -rf ${COVERITY_VERSION}
+check_fatal $? "Could not remove ${COVERITY_VERSION}"
+
+tar xf ${COVERITY_VERSION}.tar.gz
+check_fatal $? "Could not untar ${COVERITY_VERSION} tarball"
+
+test -d ${COVERITY}
+check_fatal $? "Coverity path not right after untar"
+
+test -d ${COVERITY}/bin
+cd -
+check_fatal $? "Could not cd to starting point"
+
+cov-configure -co gcc
+check_fatal $? "could not coverity configure native gcc"
+cov-configure -co g++
+check_fatal $? "could not coverity configure native g++"
+
+cd rtems-tools
+SHA=`git rev-parse --short HEAD`
+cd -
+
+cd rtems-tools
+check_fatal $? "Could not cd to rtems-tools directory for waf build"
+
+# remove results of last analysis
+rm -rf ${RESULTS_DIR} ${RESULTS_ARCHIVE}
+
+# clean up the RTEMS build
+./waf distclean
+check_fatal $? "Could not run waf distclean"
+
+./waf configure \
+  --prefix=${RTEMS_TOOLS}
+check_fatal $? "Could not run waf configure"
+
+cov-build --dir ${RESULTS_DIR} ./waf >b.log 2>&1
+check_fatal $? "Could not run waf"
+
+# Did we have problems loading the Coverity dynamic library?
+grep -i "ERROR: ld.so:.*" b.log >/dev/null
+if [ $? -ne 1 ] ; then
+  check_fatal 1 "Looks like you have dynamic library issues with Coverity."
+fi
+
+# Did Coverity report something bad?
+grep -i catastrophic ${RESULTS_DIR}/build-log.txt >/dev/null
+if [ $? -ne 1 ] ; then
+  check_fatal 1 "Catastrophic failures reported by coverity."
+fi
+
+cfound=`grep "compilation units.* are ready" \
+    ${RESULTS_DIR}/build-log.txt  | cut -d' ' -f2`
+echo "Files processed: ${cfound}"
+
+# Did Coverity report that it had no results?
+grep -i "No files were emitted" ${RESULTS_DIR}/build-log.txt >/dev/null
+if [ $? -ne 1 ] ; then
+  echo  check_fatal 1 "No output from Coverity.  Something went wrong."
+fi
+
+tar cjf ${RESULTS_ARCHIVE} ${RESULTS_DIR}
+check_fatal $? "tar of results did not work"
+
+curl \
+  --progress-bar \
+  --form token=$COVERITY_SCAN_TOKEN \
+  --form email=$OWNER_EMAIL \
+  --form file=@${RESULTS_ARCHIVE} \
+  --form version=$SHA \
+  --form description="Master" \
+  $UPLOAD_URL
+check_fatal $? "upload of results failed"
+
+exit 0

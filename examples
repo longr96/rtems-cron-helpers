@@ -1,0 +1,43 @@
+# Prep and run for coverity
+
+~/rtems-cron-helpers/rtems-cron-prepdir -D ${HOME}/rtems-cron-coverity -V6 -g
+
+~/rtems-cron-helpers/rtems-cron-run-coverity  -D ${HOME}/rtems-cron-coverity
+
+# Prep and run for master/7
+~/rtems-cron-helpers/rtems-cron-prepdir   -D ${HOME}/rtems-cron-7    -V 7   -g 
+
+nohup time sh -x ~/rtems-cron-helpers/rtems-cron-runner \
+    -v  -V 7 -D  ${HOME}/rtems-cron-7 -f >nohup-7.out 2>&1 </dev/null &
+
+
+# Prepdir for master/6
+~/rtems-cron-helpers/rtems-cron-prepdir \
+  -D ${HOME}/rtems-cron-6 \
+  -r \
+  -V 6 \
+  -g
+
+# Update on git master, rtems 6
+nohup time sh -x ~/rtems-cron-helpers/rtems-cron-runner  \
+  -v  -V 6 -D  ${HOME}/rtems-cron-6 >nohup-6.out 2>&1 </dev/null &
+
+# Update on git master, rtems 5
+nohup time sh -x ~/rtems-cron-helpers/rtems-cron-runner  \
+  -v  -V 5 -D  ${HOME}/rtems-cron-5 >nohup-5.out 2>&1 </dev/null &
+
+~/rtems-cron-helpers/rtems-cron-prepdir   -D ${HOME}/rtems-cron-411    -V 4.11   -g 
+nohup time sh -x ~/rtems-cron-helpers/rtems-cron-runner    -v  -V 4.11 -D  ${HOME}/rtems-cron-411 -f >nohup-411.out 2>&1 </dev/null &
+
+
+
+# Prepdir for m2005
+~/rtems-cron-helpers/rtems-cron-prepdir \
+  -D ${HOME}/rtems-cron-5.0.0-m2005-1\
+  -r -R https://ftp.rtems.org/pub/rtems/releases/5/5.0.0/5.0.0-m2005-1 \
+  -t 5.0.0-m2005-1
+
+# Pre-fetched m2005 (notice -g to avoid git)
+nohup time sh -x ~/rtems-cron-helpers/rtems-cron-runner  \
+  -v -g -f -V 5 -D  ${HOME}/rtems-cron-5.0.0-m2005-1 >nohup-m2005.out 2>&1 </dev/null &
+
